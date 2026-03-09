@@ -1,0 +1,3 @@
+This is a sample test file.
+Created to verify GitHub push is working correctly.
+Project: RAG MCP App
