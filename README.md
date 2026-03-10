@@ -37,7 +37,7 @@ Full-stack Retrieval-Augmented Generation app using the Model Context Protocol.
                     └─────────────────────────────────────────┘
                                │
                     ┌──────────▼──────────────────────────────┐
-                    │          Claude API (Anthropic)          │
+                    │          Claude API (Gemini)          │
                     └─────────────────────────────────────────┘
 ```
 
@@ -67,7 +67,7 @@ The first run downloads the `all-MiniLM-L6-v2` sentence-transformer model (~80 M
 ### 2. Configure environment
 ```bash
 cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+# Edit .env and set Gemini_API_KEY=sk-ant-...
 ```
 
 ### 3. Run
