@@ -9,7 +9,10 @@ from pathlib import Path
 # Ensure server directory is on path so vector_store can be imported
 sys.path.insert(0, str(Path(__file__).parent))
 
-from duckduckgo_search import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 from mcp.server.fastmcp import FastMCP
 
 from vector_store import VectorStore

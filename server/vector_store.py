@@ -1,25 +1,21 @@
 """
-ChromaDB vector store with pluggable embedding backend.
+Pure-Python vector store — no C/Rust extensions required.
 
-Primary:  sentence-transformers all-MiniLM-L6-v2   (Python ≤ 3.13 + torch)
-Fallback: character 4-gram hash embedding           (pure Python, any version)
-
-The fallback enables keyword-level retrieval; upgrade to Python 3.12 +
-sentence-transformers for full semantic search.
+Persists to a JSON file. Uses character 4-gram hash embedding for similarity
+search (keyword-level retrieval). Replaces ChromaDB to support Python 3.14+.
 """
+import json
 import math
 import uuid
 import logging
 from pathlib import Path
 from typing import Any
 
-import chromadb
-
 logger = logging.getLogger(__name__)
 
-CHROMA_PATH = Path(__file__).parent / "chroma_data"
-COLLECTION_NAME = "rag_mvp_docs"
-EMBEDDING_DIM = 256  # used by the pure-Python fallback
+DATA_PATH = Path(__file__).parent / "vector_data"
+DATA_FILE = DATA_PATH / "store.json"
+EMBEDDING_DIM = 256
 
 SEED_DOCS = [
     (
@@ -55,22 +51,7 @@ SEED_DOCS = [
 ]
 
 
-# ── Embedding backend ─────────────────────────────────────────────────
-
-def _load_model():
-    """Try sentence-transformers; fall back to pure-Python hash embedder."""
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Embedding backend: sentence-transformers (semantic)")
-        return model
-    except ImportError:
-        logger.warning(
-            "sentence-transformers not available (Python 3.14 compat issue). "
-            "Using character n-gram fallback. Install Python 3.11/3.12 for semantic search."
-        )
-        return None
-
+# ── Embedding ─────────────────────────────────────────────────────────
 
 def _hash_embed(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
     """Character 4-gram hash embedding — pure Python, no compiled deps."""
@@ -83,17 +64,28 @@ def _hash_embed(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
     return [x / mag for x in vec]
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    ma = math.sqrt(sum(x * x for x in a)) or 1.0
+    mb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return dot / (ma * mb)
+
+
+# ── VectorStore ───────────────────────────────────────────────────────
+
 class VectorStore:
+    """
+    In-process vector store backed by a JSON file.
+    Each record: {"id": str, "text": str, "source": str, "embedding": [...]}
+    """
+
     def __init__(self) -> None:
-        CHROMA_PATH.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        self._model = _load_model()
-        self._collection = self._client.get_or_create_collection(
-            COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
-        if self._collection.count() == 0:
+        DATA_PATH.mkdir(parents=True, exist_ok=True)
+        self._records: list[dict] = []
+        self._load()
+        if not self._records:
             self._seed()
+        logger.info("Vector store ready — %d chunks indexed", len(self._records))
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -101,57 +93,68 @@ class VectorStore:
         self, text: str, source: str, chunk_size: int = 300, chunk_overlap: int = 50
     ) -> int:
         chunks = self._chunk(text, chunk_size, chunk_overlap)
-        self._upsert(chunks, source)
+        for chunk in chunks:
+            self._records.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "text": chunk,
+                    "source": source,
+                    "embedding": _hash_embed(chunk),
+                }
+            )
+        self._save()
         return len(chunks)
 
     def search(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
-        count = self._collection.count()
-        if count == 0:
+        if not self._records:
             return []
-        k = min(top_k, count)
-        embedding = self._embed([query])
-        res = self._collection.query(
-            query_embeddings=embedding,
-            n_results=k,
-            include=["documents", "metadatas", "distances"],
-        )
-        out = []
-        for doc, meta, dist in zip(
-            res["documents"][0], res["metadatas"][0], res["distances"][0]
-        ):
-            out.append({"text": doc, "source": meta.get("source", "unknown"), "score": 1.0 - dist})
-        return out
+        q_emb = _hash_embed(query)
+        scored = [(_cosine(q_emb, r["embedding"]), r) for r in self._records]
+        scored.sort(key=lambda x: -x[0])
+        return [
+            {"text": r["text"], "source": r["source"], "score": score}
+            for score, r in scored[:top_k]
+        ]
 
     def list_sources(self) -> dict[str, int]:
-        res = self._collection.get(include=["metadatas"])
         counts: dict[str, int] = {}
-        for meta in res.get("metadatas") or []:
-            src = meta.get("source", "unknown")
+        for r in self._records:
+            src = r.get("source", "unknown")
             counts[src] = counts.get(src, 0) + 1
         return counts
 
     def total_count(self) -> int:
-        return self._collection.count()
+        return len(self._records)
 
     # ── internals ────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        if DATA_FILE.exists():
+            try:
+                with open(DATA_FILE, encoding="utf-8") as f:
+                    self._records = json.load(f)
+                logger.info("Loaded %d chunks from %s", len(self._records), DATA_FILE)
+            except Exception as exc:
+                logger.warning("Could not load store: %s — starting fresh", exc)
+                self._records = []
+
+    def _save(self) -> None:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(self._records, f)
 
     def _seed(self) -> None:
         logger.info("Seeding vector store with %d sample documents", len(SEED_DOCS))
         for text, source in SEED_DOCS:
-            self._upsert([text], source)
-
-    def _embed(self, texts: list[str]) -> list[list[float]]:
-        if self._model is not None:
-            return self._model.encode(texts).tolist()
-        return [_hash_embed(t) for t in texts]
-
-    def _upsert(self, chunks: list[str], source: str) -> None:
-        self._collection.add(
-            documents=chunks,
-            embeddings=self._embed(chunks),
-            metadatas=[{"source": source} for _ in chunks],
-            ids=[str(uuid.uuid4()) for _ in chunks],
-        )
+            for chunk in self._chunk(text, 300, 50):
+                self._records.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "text": chunk,
+                        "source": source,
+                        "embedding": _hash_embed(chunk),
+                    }
+                )
+        self._save()
 
     @staticmethod
     def _chunk(text: str, size: int, overlap: int) -> list[str]:

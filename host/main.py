@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import chromadb
+import json
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
@@ -30,8 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-CHROMA_PATH = ROOT / "server" / "chroma_data"
-COLLECTION_NAME = "rag_mvp_docs"
+STORE_FILE = ROOT / "server" / "vector_data" / "store.json"
 
 _agent: Agent | None = None
 
@@ -146,16 +145,17 @@ async def _extract_text(file: UploadFile) -> str:
 
 
 def _chroma_stats() -> tuple[dict[str, int], int]:
-    """Read source counts directly from ChromaDB (no sentence-transformers needed)."""
+    """Read source counts from the JSON vector store."""
     try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        coll = client.get_collection(COLLECTION_NAME)
-        res = coll.get(include=["metadatas"])
+        if not STORE_FILE.exists():
+            return {}, 0
+        with open(STORE_FILE, encoding="utf-8") as f:
+            records = json.load(f)
         counts: dict[str, int] = {}
-        for meta in (res.get("metadatas") or []):
-            src = meta.get("source", "unknown")
+        for rec in records:
+            src = rec.get("source", "unknown")
             counts[src] = counts.get(src, 0) + 1
-        return counts, coll.count()
+        return counts, len(records)
     except Exception:
         return {}, 0
 

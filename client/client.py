@@ -18,9 +18,15 @@ SERVER_PATH = Path(__file__).parent.parent / "server" / "server.py"
 
 # Use the venv Python if available; otherwise fall back to python3 / python
 def _python_cmd() -> str:
-    venv_py = Path(__file__).parent.parent / ".venv" / "bin" / "python3"
-    if venv_py.exists():
-        return str(venv_py)
+    root = Path(__file__).parent.parent
+    # Windows venv
+    win_py = root / ".venv" / "Scripts" / "python.exe"
+    if win_py.exists():
+        return str(win_py)
+    # Unix venv
+    unix_py = root / ".venv" / "bin" / "python3"
+    if unix_py.exists():
+        return str(unix_py)
     import shutil
     return shutil.which("python3") or shutil.which("python") or "python3"
 
@@ -107,14 +113,23 @@ class MCPClient:
         tool_result = await self._session.call_tool(name, arguments=args)
         if not tool_result.content:
             return None
-        raw = tool_result.content[0]
-        text = getattr(raw, "text", None)
-        if text is None:
+
+        # mcp ≥1.x returns each list element as a separate TextContent item.
+        # Parse every item and return a list when there are multiple, or a
+        # scalar when there is only one.
+        parsed = []
+        for item in tool_result.content:
+            text = getattr(item, "text", None)
+            if text is None:
+                continue
+            try:
+                parsed.append(json.loads(text))
+            except (json.JSONDecodeError, TypeError):
+                parsed.append(text)
+
+        if not parsed:
             return None
-        try:
-            return json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            return text
+        return parsed if len(parsed) > 1 else parsed[0]
 
 
 # ── singleton ─────────────────────────────────────────────────────────
