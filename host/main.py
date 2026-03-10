@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import json
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
@@ -30,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-STORE_FILE = ROOT / "server" / "vector_data" / "store.json"
+CHROMA_PATH = ROOT / "server" / "chroma_data"
 
 _agent: Agent | None = None
 
@@ -145,17 +144,17 @@ async def _extract_text(file: UploadFile) -> str:
 
 
 def _chroma_stats() -> tuple[dict[str, int], int]:
-    """Read source counts from the JSON vector store."""
+    """Read source counts from ChromaDB."""
     try:
-        if not STORE_FILE.exists():
-            return {}, 0
-        with open(STORE_FILE, encoding="utf-8") as f:
-            records = json.load(f)
+        import chromadb
+        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+        collection = client.get_or_create_collection("documents")
+        results = collection.get(include=["metadatas"])
         counts: dict[str, int] = {}
-        for rec in records:
-            src = rec.get("source", "unknown")
+        for meta in results["metadatas"]:
+            src = meta.get("source", "unknown")
             counts[src] = counts.get(src, 0) + 1
-        return counts, len(records)
+        return counts, collection.count()
     except Exception:
         return {}, 0
 

@@ -5,3 +5,4 @@ __pycache__/
 server/chroma_data/
 *.egg-info/
 .DS_Store
+.claude/
